@@ -75,4 +75,3 @@ Makefile             make test | solver | solver-gate
 ## License
 
 MIT — see [LICENSE](LICENSE).
-# arweave-brute
