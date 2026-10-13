@@ -553,6 +553,20 @@ static int load_message(const char* msg_file, BruteConfig* cfg) {
     return 0;
 }
 
+// Strip PKCS#7 padding (16-byte blocks) from a decrypted buffer, in place.
+// The kernel decrypts the full padded block chain, so the wallet buffer ends
+// in pad bytes; without this, SOLVED_wallet.json would be valid BYTES but not
+// valid JSON (trailing bytes break every parser downstream). Invalid "padding"
+// is left untouched — never corrupt a wallet on a guess.
+static void strip_pkcs7(uint8_t* buf, uint32_t* len) {
+    if (*len == 0) return;
+    uint32_t v = buf[*len - 1];
+    if (v < 1 || v > 16 || *len < v) return;
+    for (uint32_t i = *len - v; i < *len; i++)
+        if (buf[i] != v) return;    // not PKCS#7 -> leave the bytes as-is
+    *len -= v;
+}
+
 #ifndef SOLVER_HOST_ONLY
 int main(int argc, char* argv[]) {
     const char* msg_file = NULL;
@@ -689,6 +703,7 @@ int main(int argc, char* argv[]) {
             printf("FOUND %llu/%llu\n", (unsigned long long)end, (unsigned long long)total);
             fwrite(host_ret.phrase, 1, host_ret.phrase_len, stdout);
             printf("\n");
+            strip_pkcs7(host_ret.wallet, &host_ret.wallet_len);   // valid JSON out
             FILE* wf = fopen("SOLVED_wallet.json", "wb");
             if (wf) { fwrite(host_ret.wallet, 1, host_ret.wallet_len, wf); fclose(wf); }
             fprintf(stderr, "SOLVED_WALLET_SAVED len=%u\n", host_ret.wallet_len);

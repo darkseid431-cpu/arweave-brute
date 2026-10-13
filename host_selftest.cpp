@@ -33,6 +33,22 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "usage: %s <msg.b64> <password> [solution_tag]\n", argv[0]);
         return 2;
     }
+
+    // ---- gate 0: PKCS#7 strip — SOLVED_wallet.json must come out valid JSON ----
+    {
+        uint8_t buf[32]; uint32_t len;
+        memset(buf, 0x41, 32);                       // 'A' payload
+        for (int i = 27; i < 32; i++) buf[i] = 5;    // 5 bytes of 5 -> 27 + 5 = 32
+        len = 32; strip_pkcs7(buf, &len);
+        if (len != 27) { fprintf(stderr, "PKCS7_STRIP FAIL: padded len=%u want 27\n", len); return 1; }
+        buf[31] = 9;                                 // pad-value mismatch must NOT strip
+        len = 32; strip_pkcs7(buf, &len);
+        if (len != 32) { fprintf(stderr, "PKCS7_STRIP FAIL: mismatched pad stripped, len=%u\n", len); return 1; }
+        buf[31] = 0;                                 // out-of-range value must NOT strip
+        len = 32; strip_pkcs7(buf, &len);
+        if (len != 32) { fprintf(stderr, "PKCS7_STRIP FAIL: v=0 stripped, len=%u\n", len); return 1; }
+        printf("PKCS7_STRIP OK (wallet padding removed; invalid padding preserved)\n");
+    }
     BruteConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     if (load_message(argv[1], &cfg) != 0) return 2;
