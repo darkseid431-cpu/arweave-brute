@@ -1,0 +1,7 @@
+# build artifacts
+/our_solver
+/host_selftest
+*.o
+
+# run artifacts
+SOLVED_wallet.json
