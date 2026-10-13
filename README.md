@@ -55,12 +55,18 @@ Brute force:
 ./our_solver --msg_file=fixtures/pzl8_msg.b64 \
              --keys_file=keys.txt \
              --solution_tag='"kty":"RSA"' \
-             --block=256 --grid=256
+             --block=128 --grid=120 --begin=0 --end=1048576
 ```
 
 `keys.txt`: one line per position, comma-separated word list; candidates are
 concatenations picking one word per position, in order. Exit 0 + `FOUND …`
 prints the winning passphrase and writes `SOLVED_wallet.json`; exit 1 = no match.
+
+Defaults: `--block=128 --grid=120` (128×120 = 3 blocks/SM on a 40-SM T4).
+`--begin=N --end=M` grinds only the mixed-radix index range `[N, M)` of the
+cartesian space (default: the whole space) — that's the shard granularity a
+range ledger uses to resume an interrupted run without re-testing covered
+combinations. An empty range (`begin >= end`) exits 2.
 
 ## Layout
 

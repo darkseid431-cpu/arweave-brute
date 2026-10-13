@@ -13,7 +13,8 @@
 //
 // Usage:
 //   ./our_solver --msg_file=msg.b64 --keys_file=keys.txt [--solution_tag='"kty":"RSA"']
-//                [--block=256] [--grid=128]
+//                [--block=128] [--grid=120] [--begin=N] [--end=M]   <- resume shard:
+//                grind only the index range [begin, end) of the cartesian space
 //   ./our_solver --msg_file=msg.b64 --selftest-pw=RasputinWilhelmAlekhine
 //                [--solution_tag='"kty":"RSA"']     <- CPU self-test (exit 0 if ok)
 //
@@ -559,7 +560,8 @@ int main(int argc, char* argv[]) {
     const char* selftest_pw = NULL;
     const char* selftest_gpu_pw = NULL;
     const char* solution_tag = "\"kty\":\"RSA\"";
-    int block = 256, grid = 128, verbose = 1;
+    int block = 128, grid = 120, verbose = 1;   // 128x120 = 3 blocks/SM on a 40-SM T4
+    uint64_t begin_opt = 0, end_opt = 0;        // 0 = default (full space)
 
     for (int i = 1; i < argc; i++) {
         if (!strncmp(argv[i], "--msg_file=", 11)) msg_file = argv[i] + 11;
@@ -569,6 +571,8 @@ int main(int argc, char* argv[]) {
         else if (!strncmp(argv[i], "--solution_tag=", 15)) solution_tag = argv[i] + 15;
         else if (!strncmp(argv[i], "--block=", 8)) block = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--grid=", 7)) grid = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--begin=", 8)) begin_opt = strtoull(argv[i] + 8, NULL, 10);
+        else if (!strncmp(argv[i], "--end=", 6)) end_opt = strtoull(argv[i] + 6, NULL, 10);
         else if (!strncmp(argv[i], "--verbose=", 10)) verbose = atoi(argv[i] + 10);
     }
     if (!msg_file) {
@@ -618,9 +622,21 @@ int main(int argc, char* argv[]) {
     uint64_t total = 1;
     for (int i = 0; i < cfg.keys_num; i++) total *= cfg.words_num[i];
 
+    // clamp the requested grind range to the space
+    if (end_opt == 0 || end_opt > total) end_opt = total;
+    if (begin_opt >= end_opt) {
+        fprintf(stderr, "empty range: begin=%llu end=%llu total=%llu\n",
+                (unsigned long long)begin_opt, (unsigned long long)end_opt,
+                (unsigned long long)total);
+        return 2;
+    }
+
     if (verbose) {
         printf("keys_num=%d total_combos=%llu ciphertext=%u bytes tag='%s'\n",
                cfg.keys_num, (unsigned long long)total, cfg.ciphertext_size, solution_tag);
+        if (begin_opt != 0 || end_opt != total)
+            printf("range: %llu..%llu\n", (unsigned long long)begin_opt,
+                   (unsigned long long)end_opt);
         for (int i = 0; i < cfg.keys_num; i++) {
             printf("  pos %d (%u words): ", i, cfg.words_num[i]);
             for (int w = 0; w < cfg.words_num[i] && w < 12; w++)
@@ -648,15 +664,15 @@ int main(int argc, char* argv[]) {
     check_cuda(cudaMemset(d_ret, 0, sizeof(BruteResult)), "memset ret");
 
     const uint64_t chunk = (uint64_t)grid * block;
-    uint64_t done = 0;
+    uint64_t done = begin_opt;          // resume shard: start at --begin, not 0
     cudaEvent_t start_ev, end_ev;
     cudaEventCreate(&start_ev); cudaEventCreate(&end_ev);
     cudaEventRecord(start_ev);
 
-    while (done < total) {
+    while (done < end_opt) {
         uint64_t begin = done;
         uint64_t end = done + chunk;
-        if (end > total) end = total;
+        if (end > end_opt) end = end_opt;
         brute_kernel<<<grid, block>>>(d_cfg, begin, end, d_ret);
         check_cuda(cudaGetLastError(), "kernel launch");
         check_cuda(cudaDeviceSynchronize(), "kernel sync");
@@ -678,10 +694,10 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "SOLVED_WALLET_SAVED len=%u\n", host_ret.wallet_len);
             return 0;
         }
-        if (verbose && (end % (chunk * 100) < chunk || end == total)) {
+        if (verbose && (end % (chunk * 100) < chunk || end == end_opt)) {
             cudaEventRecord(end_ev); cudaEventSynchronize(end_ev);
             float ms; cudaEventElapsedTime(&ms, start_ev, end_ev);
-            double rate = (double)end / (ms / 1000.0);
+            double rate = (double)(end - begin_opt) / (ms / 1000.0);
             fprintf(stderr, "  ...%llu/%llu (%.0f/s)\n", (unsigned long long)end, (unsigned long long)total, rate);
         }
     }
@@ -690,7 +706,8 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "GPU_SELFTEST_FAIL tag_found=false pw='%s'\n", selftest_gpu_pw);
         return 1;
     }
-    fprintf(stderr, "NO_MATCH %llu combos\n", (unsigned long long)total);
+    fprintf(stderr, "NO_MATCH %llu combos (range %llu..%llu)\n", (unsigned long long)total,
+            (unsigned long long)begin_opt, (unsigned long long)end_opt);
     return 1;
 }
 #endif // !SOLVER_HOST_ONLY
