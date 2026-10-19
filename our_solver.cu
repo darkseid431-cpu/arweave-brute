@@ -40,7 +40,7 @@
 
 #define MAX_KEYS       16
 #define MAX_WORDS      64
-#define MAX_WORD_LEN   16
+#define MAX_WORD_LEN   16    // words_pool slot size; over-long words are REJECTED, never clamped
 #define MAX_PHRASE     128
 #define MAX_MSG        8192
 #define SHA512_DIGEST_SIZE 64
@@ -520,7 +520,15 @@ static int parse_keys(const char* path, BruteConfig* cfg) {
         int w = 0;
         while (tok && w < MAX_WORDS) {
             int len = strlen(tok);
-            if (len > MAX_WORD_LEN) len = MAX_WORD_LEN;
+            if (len > MAX_WORD_LEN) {
+                // never truncate silently: a clamped word would test a WRONG
+                // candidate and report a silent miss
+                fprintf(stderr, "keys file %s: word %d of position %d is %d chars, "
+                        "max is MAX_WORD_LEN=%d: '%.*s'\n",
+                        path, w, k, len, MAX_WORD_LEN, len, tok);
+                fclose(f);
+                return -1;
+            }
             cfg->words_len[k][w] = len;
             for (int i = 0; i < len; i++) cfg->words_pool[k][w][i] = (uint8_t)tok[i];
             cfg->words_num[k] = w + 1;
@@ -531,6 +539,20 @@ static int parse_keys(const char* path, BruteConfig* cfg) {
     }
     fclose(f);
     cfg->keys_num = k;
+    // worst-case assembled phrase (one max-length word per position) must fit
+    // the phrase buffer used by index_to_phrase
+    uint64_t worst = 0;
+    for (int i = 0; i < k; i++) {
+        uint16_t mx = 0;
+        for (int j = 0; j < cfg->words_num[i]; j++)
+            if (cfg->words_len[i][j] > mx) mx = cfg->words_len[i][j];
+        worst += mx;
+    }
+    if (worst > MAX_PHRASE) {
+        fprintf(stderr, "keys file %s: worst-case phrase %llu chars > MAX_PHRASE=%d\n",
+                path, (unsigned long long)worst, MAX_PHRASE);
+        return -1;
+    }
     return 0;
 }
 
@@ -605,6 +627,11 @@ int main(int argc, char* argv[]) {
     if (selftest_pw) {
         uint8_t pw[64];
         int pw_len = strlen(selftest_pw);
+        if (pw_len < 1 || pw_len > (int)sizeof(pw)) {
+            fprintf(stderr, "selftest pw length %d out of range 1..%d\n",
+                    pw_len, (int)sizeof(pw));
+            return 2;
+        }
         for (int i = 0; i < pw_len; i++) pw[i] = (uint8_t)selftest_pw[i];
         uint8_t ok = verify_candidate(pw, pw_len, &cfg);
         if (ok) {
@@ -617,14 +644,36 @@ int main(int argc, char* argv[]) {
     }
 
     if (selftest_gpu_pw) {
-        // GPU self-test: single position, single word = known-good password.
+        // GPU self-test: the known-good password as the ONLY candidate.
         // Exercises the REAL kernel: table access, key feeding, tag search.
+        // Words live in MAX_WORD_LEN-byte slots, so a longer password is split
+        // into ceil(len/MAX_WORD_LEN) single-word positions; index_to_phrase
+        // concatenates one word per position in order, reconstructing the exact
+        // password. NEVER clamp here — a truncated candidate is a silent miss
+        // (that bug made the first T4 run fail its gate).
         int len = strlen(selftest_gpu_pw);
-        if (len > MAX_WORD_LEN) len = MAX_WORD_LEN;
-        cfg.keys_num = 1;
-        cfg.words_num[0] = 1;
-        cfg.words_len[0][0] = len;
-        for (int i = 0; i < len; i++) cfg.words_pool[0][0][i] = (uint8_t)selftest_gpu_pw[i];
+        if (len < 1 || len > MAX_PHRASE) {
+            fprintf(stderr, "selftest-gpu pw length %d out of range 1..%d\n",
+                    len, MAX_PHRASE);
+            return 2;
+        }
+        int pos = 0, off = 0;
+        while (off < len) {
+            int chunk = len - off;
+            if (chunk > MAX_WORD_LEN) chunk = MAX_WORD_LEN;
+            if (pos >= MAX_KEYS) {
+                fprintf(stderr, "selftest-gpu pw needs %d positions, max is MAX_KEYS=%d\n",
+                        pos + 1, MAX_KEYS);
+                return 2;
+            }
+            cfg.words_num[pos] = 1;
+            cfg.words_len[pos][0] = (uint16_t)chunk;
+            for (int i = 0; i < chunk; i++)
+                cfg.words_pool[pos][0][i] = (uint8_t)selftest_gpu_pw[off + i];
+            pos++;
+            off += chunk;
+        }
+        cfg.keys_num = (uint8_t)pos;
     } else {
         if (!keys_file) {
             fprintf(stderr, "need --keys_file=...\n");
